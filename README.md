@@ -192,9 +192,9 @@ Se algo falhar, inclua estes dados na issue:
 - `Run-Debloat-As-Admin.cmd`: launcher com UAC
 - `README.md`: documentacao
 
-## Star History
+## Star History:
 
-<a href="https://www.star-history.com/#Devzinh/WindowsDebloat&Date">
+<a href="https://www.star-history.com/?repos=Devzinh%2FWindowsDebloat&type=date&legend=top-left">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Devzinh/WindowsDebloat&type=date&theme=dark&legend=top-left" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Devzinh/WindowsDebloat&type=date&legend=top-left" />
