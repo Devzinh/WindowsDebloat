@@ -191,3 +191,7 @@ Se algo falhar, inclua estes dados na issue:
 - `Invoke-WindowsDebloat.ps1`: script principal
 - `Run-Debloat-As-Admin.cmd`: launcher com UAC
 - `README.md`: documentacao
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Devzinh/WindowsDebloat&type=date&legend=top-left)](https://www.star-history.com/?repos=Devzinh%2FWindowsDebloat&type=date&legend=top-left)
