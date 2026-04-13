@@ -1,12 +1,3 @@
-<#
-.SYNOPSIS
-  Interactive Windows 10/11 cleanup: remove optional apps, tighten privacy, tweak UI - with backups you can restore.
-
-.NOTES
-  If not elevated, the script will ask UAC permission and relaunch itself as Administrator.
-  Backups are saved under: <script folder>\backups\
-#>
-
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Continue'
 
