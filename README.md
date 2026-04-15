@@ -13,6 +13,7 @@ Ele foi feito para ser rapido, simples e reversivel:
 - elevação automática (UAC)
 - backup por sessão
 - restore para mudanças de registro e servicos
+- **Deep tweaks** opcionais (ficheiro separado `DeepTweaks.ps1`, carregado por *dot-sourcing* no arranque do script principal)
 
 > [!WARNING]
 > O script altera configurações do sistema (registro, servicos e apps). Use por sua conta e risco.  
@@ -78,7 +79,24 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\Invoke-WindowsDebloat.ps1
 - Backup automatico de mudanças reversiveis em JSON
 - Restaura por sessão com aplicacao em ordem reversa
 
+### Deep tweaks (agressivos):
+
+Funcoes extra em [`DeepTweaks.ps1`](DeepTweaks.ps1), carregadas automaticamente quando o ficheiro esta na mesma pasta que `Invoke-WindowsDebloat.ps1`. Cada passo usa o mesmo fluxo `Invoke-TweakStep` + helpers com backup.
+
+- **Performance / energia:** efeitos visuais, animacoes, transparencia, Fast Startup, plano alto desempenho, hibernacao off, servicos SysMain, WSearch, Fax, RemoteRegistry (se existirem).
+- **Gaming:** Game DVR / Game Bar, Game Mode, rato (sem "enhance pointer precision"), `HwSchMode` (GPU scheduling) em builds suportadas.
+- **Rede:** `NetworkThrottlingIndex`, `SystemResponsiveness`, LLMNR/multicast, Delivery Optimization, ajustes TCP por interface.
+- **Privacidade extra:** Cortana / pesquisa web em politica, widgets, CEIP, Windows Error Reporting, feedback.
+- **Hardening:** SMBv1 (feature opcional), AutoRun, Windows Script Host, Remote Assistance, **negar RDP recebido** (`fDenyTSConnections`).
+
+> [!CAUTION]
+> Os **deep tweaks** (submenu **A**) sao **muito mais agressivos** que as opcoes 1-8. So entre se for de proposito. Use restore (`R`) para reverter. Parte das alteracoes pode exigir **reinicio**.
+
 ## Menu:
+
+### Principal (alto nivel)
+
+Os menus usam **setas para cima/baixo** e **ENTER** para confirmar (estilo aplicativo). **ESC** no menu principal sai do script; no submenu Advanced / Deep tweaks e na lista de restore, **ESC** cancela / volta. Se a consola nao suportar `ReadKey` (ex.: entrada redireccionada), o script faz *fallback* para escolha por numero.
 
 1. Remove optional pre-installed apps (current user)
 2. Remove optional apps for NEW profiles (provisioned)
@@ -87,10 +105,26 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\Invoke-WindowsDebloat.ps1
 5. Taskbar: align icons to the LEFT
 6. Appearance: enable dark mode
 7. Extras: show file extensions, reduce lock screen tips
-8. Run ALL safe tweaks (1,3,4,5,6,7)
-R. Restore from backup file
-L. List backup files
+8. Run ALL safe tweaks (1,3,4,5,6,7)  
+**A)** Advanced / Deep tweaks (abre submenu; agressivo; mesmo backup/restore)
+
+R. Restore from backup file  
+L. List backup files  
 Q. Quit
+
+### Submenu Advanced / Deep tweaks
+
+Apos escolher **A** no menu principal:
+
+| Opcao | Descricao |
+|-------|-----------|
+| **1** | Deep performance (visual effects, services, power, hibernation...) |
+| **2** | Deep gaming (Game DVR, mouse accel, GPU scheduling...) |
+| **3** | Deep network (LLMNR, Delivery Optimization, TCP tweaks...) |
+| **4** | Deep privacy extra (Cortana/search web, error reporting...) |
+| **5** | Security hardening (SMBv1, Remote Assistance, RDP...) |
+| **6** | Run **all** deep tweaks (1-5 em sequencia), com confirmacao `y/N` |
+| **B** | Back to main menu |
 
 ## Perfil padrão:
 
@@ -150,10 +184,15 @@ Os apps abaixo estao na lista padrão de remoção (`Get-BloatPackageNames`):
 
 - Backups ficam em `.\backups\session-YYYYMMDD-HHMMSS.json`.
 - O script registra mudancas de:
-  - registro (DWORD)
+  - registro (**DWORD** e tambem **String/ExpandString/QWord** via `RegistryProperty`)
   - startup type de servicos
   - tweak de context menu classico
+  - **plano de energia ativo** (`PowerActiveScheme`)
+  - **hibernacao** (`HibernateEnabledState` + `powercfg`)
+  - **features opcionais Windows** (`OptionalFeatureState`, ex.: SMBv1)
 - O restore (opcao `R`) aplica tudo em ordem reversa.
+
+Se `DeepTweaks.ps1` nao estiver na pasta do script, aparece um aviso e a opcao **A** (submenu Advanced / Deep tweaks) informa que o modulo nao esta disponivel.
 
 Notas:
 
@@ -188,7 +227,8 @@ Se algo falhar, inclua estes dados na issue:
 
 ## Arquivos do projeto:
 
-- `Invoke-WindowsDebloat.ps1`: script principal
+- `Invoke-WindowsDebloat.ps1`: script principal (helpers de backup, menu, restore)
+- `DeepTweaks.ps1`: deep tweaks agressivos; **dot-sourced** pelo principal (funcoes no mesmo escopo)
 - `Run-Debloat-As-Admin.cmd`: launcher com UAC
 - `README.md`: documentacao
 

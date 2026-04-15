@@ -7,134 +7,8 @@
   Backups are saved under: <script folder>\backups\
 #>
 
-[CmdletBinding(SupportsShouldProcess)]
-param(
-    [switch]$DryRun,
-    [switch]$RunAll,
-    [string]$LogFile,
-    [switch]$SkipElevationCheck
-)
-
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Continue'
-
-$Script:RootDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$Script:BackupDir = Join-Path $Script:RootDir 'backups'
-$Script:SessionBackup = $null
-$Script:SessionChanges = [System.Collections.Generic.List[object]]::new()
-$Script:LogFile = $null
-$Script:Summary = @{
-    Succeeded = 0
-    Failed    = 0
-    Skipped   = 0
-    Details   = [System.Collections.Generic.List[object]]::new()
-}
-
-function ConvertTo-LogDataString {
-    param([hashtable]$Data)
-
-    if ($null -eq $Data -or $Data.Count -eq 0) {
-        return $null
-    }
-
-    try {
-        return ($Data | ConvertTo-Json -Depth 8 -Compress)
-    } catch {
-        return ($Data | Out-String).Trim()
-    }
-}
-
-function Write-Log {
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet('Info', 'Warning', 'Error', 'Success', 'Debug')]
-        [string]$Level,
-        [Parameter(Mandatory)]
-        [string]$Message,
-        [hashtable]$Data
-    )
-
-    $dataText = ConvertTo-LogDataString -Data $Data
-    $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level.ToUpperInvariant(), $Message
-    if ($dataText) {
-        $line = '{0} | Data: {1}' -f $line, $dataText
-    }
-
-    switch ($Level) {
-        'Info' { Write-Host $Message -ForegroundColor Cyan }
-        'Success' { Write-Host $Message -ForegroundColor Green }
-        'Debug' { Write-Host $Message -ForegroundColor DarkGray }
-        'Warning' { Write-Warning $Message }
-        'Error' { Write-Error $Message }
-    }
-
-    if ($Script:LogFile) {
-        try {
-            $parent = Split-Path -Parent $Script:LogFile
-            if ($parent -and (Test-Path -LiteralPath $parent)) {
-                Add-Content -LiteralPath $Script:LogFile -Value $line -Encoding UTF8
-            }
-        } catch {
-            # Keep logging failures non-fatal.
-        }
-    }
-}
-
-function Add-SummaryDetail {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Label,
-        [Parameter(Mandatory)]
-        [ValidateSet('Succeeded', 'Failed', 'Skipped')]
-        [string]$Result,
-        [string]$Error
-    )
-
-    switch ($Result) {
-        'Succeeded' { $Script:Summary.Succeeded++ }
-        'Failed' { $Script:Summary.Failed++ }
-        'Skipped' { $Script:Summary.Skipped++ }
-    }
-
-    $Script:Summary.Details.Add([pscustomobject]@{
-        Timestamp = Get-Date
-        Label     = $Label
-        Result    = $Result
-        Error     = $Error
-    })
-}
-
-function Show-Summary {
-    if ($Script:Summary.Details.Count -eq 0) {
-        Write-Log -Level Info -Message 'No tracked operations were recorded in this session.'
-        return
-    }
-
-    Write-Log -Level Info -Message 'Execution summary:'
-    $rows = foreach ($detail in $Script:Summary.Details) {
-        $symbol = switch ($detail.Result) {
-            'Succeeded' { [char]0x2713 }
-            'Failed' { [char]0x2717 }
-            default { 'skipped' }
-        }
-
-        [pscustomobject]@{
-            Result    = $symbol
-            Operation = $detail.Label
-            Error     = $detail.Error
-        }
-    }
-
-    $rows | Format-Table -AutoSize | Out-String | ForEach-Object {
-        foreach ($line in ($_ -split [Environment]::NewLine)) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Log -Level Info -Message $line
-            }
-        }
-    }
-
-    Write-Log -Level Info -Message ('Succeeded: {0} | Failed: {1} | Skipped: {2}' -f $Script:Summary.Succeeded, $Script:Summary.Failed, $Script:Summary.Skipped)
-}
 
 function Test-IsAdministrator {
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -142,7 +16,7 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Ensure-ElevatedSession {
+function Assert-ElevatedSession {
     if (Test-IsAdministrator) { return }
 
     $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
@@ -151,33 +25,25 @@ function Ensure-ElevatedSession {
     }
 
     $hostExe = (Get-Process -Id $PID).Path
-    $args = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
-    if ($DryRun) { $args += ' -DryRun' }
-    if ($RunAll) { $args += ' -RunAll' }
-    if ($LogFile) { $args += " -LogFile `"$LogFile`"" }
-    if ($SkipElevationCheck) { $args += ' -SkipElevationCheck' }
+    $argumentList = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
 
-    Write-Log -Level Warning -Message 'Administrator rights are required. Requesting UAC elevation...'
+    Write-Host "Administrator rights are required. Requesting UAC elevation..." -ForegroundColor Yellow
     try {
-        Start-Process -FilePath $hostExe -ArgumentList $args -Verb RunAs -ErrorAction Stop | Out-Null
-        Write-Log -Level Success -Message 'A new elevated PowerShell window was opened. Continue there.'
+        Start-Process -FilePath $hostExe -ArgumentList $argumentList -Verb RunAs -ErrorAction Stop | Out-Null
+        Write-Host "A new elevated PowerShell window was opened. Continue there." -ForegroundColor Green
         exit
     } catch {
-        Write-Log -Level Error -Message 'Elevation was canceled or failed. Please run PowerShell as Administrator and try again.'
+        Write-Error "Elevation was canceled or failed. Please run PowerShell as Administrator and try again."
         exit 1
     }
 }
 
-function Test-OSCompatibility {
-    $build = [System.Environment]::OSVersion.Version.Build
-    Write-Log -Level Info -Message "Detected Windows build: $build"
-    if ($build -lt 19041) {
-        Write-Log -Level Warning -Message "Windows build $build is below 19041. Some tweaks may not apply on this OS."
-        return $false
-    }
+Assert-ElevatedSession
 
-    return $true
-}
+$Script:RootDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$Script:BackupDir = Join-Path $Script:RootDir 'backups'
+$Script:SessionBackup = $null
+$Script:SessionChanges = [System.Collections.Generic.List[object]]::new()
 
 function Get-ChangeProperty {
     param(
@@ -198,40 +64,8 @@ function Get-ChangeProperty {
 }
 
 function Initialize-BackupDir {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     if (-not (Test-Path -LiteralPath $Script:BackupDir)) {
-        if ($DryRun) {
-            Write-Log -Level Debug -Message "DRY-RUN: Would create backup directory '$Script:BackupDir'."
-            return
-        }
-
-        if ($PSCmdlet.ShouldProcess($Script:BackupDir, 'Create backup directory')) {
-            New-Item -ItemType Directory -Path $Script:BackupDir -Force | Out-Null
-            Write-Log -Level Debug -Message "Created backup directory '$Script:BackupDir'."
-        }
-    }
-}
-
-function Initialize-LogFile {
-    if ([string]::IsNullOrWhiteSpace($LogFile)) {
-        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $Script:LogFile = Join-Path $Script:BackupDir "run-$stamp.log"
-    } else {
-        $Script:LogFile = $LogFile
-    }
-
-    try {
-        $parent = Split-Path -Parent $Script:LogFile
-        if ($parent -and -not (Test-Path -LiteralPath $parent) -and -not $DryRun) {
-            New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
-        }
-        if (-not (Test-Path -LiteralPath $Script:LogFile) -and (Test-Path -LiteralPath $parent) -and -not $DryRun) {
-            New-Item -ItemType File -Path $Script:LogFile -Force -ErrorAction Stop | Out-Null
-        }
-    } catch {
-        $Script:LogFile = $null
+        New-Item -ItemType Directory -Path $Script:BackupDir -Force | Out-Null
     }
 }
 
@@ -240,77 +74,25 @@ function Initialize-SessionBackup {
     if ($null -ne $Script:SessionBackup) { return }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $Script:SessionBackup = Join-Path $Script:BackupDir "session-$stamp.json"
-    Write-Log -Level Debug -Message "Reversible changes this run are logged to: $Script:SessionBackup"
+    Write-Host "Reversible changes this run are logged to: $Script:SessionBackup" -ForegroundColor DarkGray
 }
 
 function Save-SessionBackup {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     if (-not $Script:SessionBackup) { return }
-
-    if ($DryRun) {
-        Write-Log -Level Debug -Message "DRY-RUN: Would write session backup file '$Script:SessionBackup'."
-        return
-    }
-
     $payload = @{
         CreatedUtc = (Get-Date).ToUniversalTime().ToString('o')
         Computer   = $env:COMPUTERNAME
         User       = $env:USERNAME
         Changes    = @($Script:SessionChanges)
     }
-
-    if ($PSCmdlet.ShouldProcess($Script:SessionBackup, 'Write session backup file')) {
-        $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Script:SessionBackup -Encoding UTF8
-    }
+    $payload | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Script:SessionBackup -Encoding UTF8
 }
 
 function Add-ChangeRecord {
     param([hashtable]$Record)
     Initialize-SessionBackup
     $Script:SessionChanges.Add($Record)
-    if ($DryRun) {
-        Write-Log -Level Debug -Message "DRY-RUN: Skipping session backup write for change '$($Record.Id)'."
-        return
-    }
     Save-SessionBackup
-}
-
-function Remove-OldBackups {
-    [CmdletBinding(SupportsShouldProcess)]
-    param([int]$KeepCount = 10)
-
-    if (-not (Test-Path -LiteralPath $Script:BackupDir)) {
-        Write-Log -Level Debug -Message 'Backup directory does not exist yet. No old backups to rotate.'
-        return
-    }
-
-    $files = @(Get-ChildItem -LiteralPath $Script:BackupDir -Filter 'session-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
-    if ($files.Count -le $KeepCount) {
-        Write-Log -Level Debug -Message "Backup rotation checked. Nothing to remove (keep count: $KeepCount)."
-        return
-    }
-
-    $removed = 0
-    foreach ($file in $files[$KeepCount..($files.Count - 1)]) {
-        if ($DryRun) {
-            Write-Log -Level Debug -Message "DRY-RUN: Would delete old backup '$($file.FullName)'."
-            $removed++
-            continue
-        }
-
-        if ($PSCmdlet.ShouldProcess($file.FullName, 'Remove old backup file')) {
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
-            $removed++
-        }
-    }
-
-    if ($DryRun) {
-        Write-Log -Level Info -Message "Backup rotation would remove $removed old backup file(s)."
-    } else {
-        Write-Log -Level Info -Message "Backup rotation removed $removed old backup file(s)."
-    }
 }
 
 function Read-RegistryValueSafe {
@@ -327,36 +109,17 @@ function Read-RegistryValueSafe {
 }
 
 function Set-RegistryDwordWithBackup {
-    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$Path,
         [string]$Name,
         [int]$Value,
         [string]$ChangeId
     )
-
-    $prev = Read-RegistryValueSafe -Path $Path -Name $Name
-    if ($DryRun) {
-        Write-Log -Level Debug -Message "DRY-RUN: Would set registry DWORD '$Path\$Name' to '$Value'." -Data @{ ChangeId = $ChangeId; Previous = $prev; New = $Value }
-        Add-ChangeRecord @{
-            Kind     = 'RegistryDWord'
-            Id       = $ChangeId
-            Path     = $Path
-            Name     = $Name
-            Previous = $prev
-            New      = $Value
-        }
-        return
-    }
-
     if (-not (Test-Path -LiteralPath $Path)) {
-        if ($PSCmdlet.ShouldProcess($Path, 'Create registry path')) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-        }
+        New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
     }
-    if ($PSCmdlet.ShouldProcess("$Path\$Name", "Set registry DWORD to $Value")) {
-        Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Type DWord -Force -ErrorAction Stop
-    }
+    $prev = Read-RegistryValueSafe -Path $Path -Name $Name
+    Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Type DWord -Force -ErrorAction Stop
     Add-ChangeRecord @{
         Kind     = 'RegistryDWord'
         Id       = $ChangeId
@@ -367,48 +130,139 @@ function Set-RegistryDwordWithBackup {
     }
 }
 
+function Set-RegistryPropertyWithBackup {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [Parameter(Mandatory)]
+        [string]$Name,
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        $Value,
+        [Parameter(Mandatory)]
+        [ValidateSet('DWord', 'String', 'ExpandString', 'QWord')]
+        [string]$PropertyType,
+        [Parameter(Mandatory)]
+        [string]$ChangeId
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+    }
+    $prev = Read-RegistryValueSafe -Path $Path -Name $Name
+    Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Type $PropertyType -Force -ErrorAction Stop
+    Add-ChangeRecord @{
+        Kind          = 'RegistryProperty'
+        Id            = $ChangeId
+        Path          = $Path
+        Name          = $Name
+        PropertyType  = $PropertyType
+        Previous      = $prev
+        New           = $Value
+    }
+}
+
+function Get-ActivePowerSchemeGuid {
+    $out = & powercfg.exe /getactivescheme 2>&1 | Out-String
+    if ($out -match '(?i)GUID:\s*([a-f0-9-]{36})') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Set-HighPerformancePowerPlanWithBackup {
+    param([Parameter(Mandatory)][string]$ChangeId)
+    $previous = Get-ActivePowerSchemeGuid
+    $candidates = @(
+        '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c',
+        'e9a42b02-d5df-448d-aa00-03f14749eb61'
+    )
+    $activated = $null
+    foreach ($g in $candidates) {
+        $null = & powercfg.exe /setactive $g 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $activated = $g
+            break
+        }
+    }
+    if (-not $activated) {
+        $dupLine = & powercfg.exe -duplicatescheme 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>&1 | Out-String
+        if ($dupLine -match '([a-f0-9-]{36})') {
+            $newGuid = $Matches[1]
+            $null = & powercfg.exe /setactive $newGuid 2>&1
+            if ($LASTEXITCODE -eq 0) { $activated = $newGuid }
+        }
+    }
+    if (-not $activated) {
+        throw 'Could not activate a high performance power plan.'
+    }
+    $nowActive = Get-ActivePowerSchemeGuid
+    Add-ChangeRecord @{
+        Kind     = 'PowerActiveScheme'
+        Id       = $ChangeId
+        Previous = $previous
+        New      = $nowActive
+    }
+}
+
+function Set-HibernateOffWithBackup {
+    param([Parameter(Mandatory)][string]$ChangeId)
+    $powerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+    $prevEnabled = Read-RegistryValueSafe -Path $powerKey -Name 'HibernateEnabled'
+    $null = & powercfg.exe /hibernate off 2>&1
+    Add-ChangeRecord @{
+        Kind               = 'HibernateEnabledState'
+        Id                 = $ChangeId
+        PreviousEnabled    = $prevEnabled
+    }
+}
+
+function Set-OptionalWindowsFeatureStateWithBackup {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FeatureName,
+        [Parameter(Mandatory)]
+        [ValidateSet('Disabled', 'Enabled')]
+        [string]$DesiredState,
+        [Parameter(Mandatory)]
+        [string]$ChangeId
+    )
+    $feat = Get-WindowsOptionalFeature -Online -FeatureName $FeatureName -ErrorAction SilentlyContinue
+    if (-not $feat) { throw "Optional feature not found: $FeatureName" }
+    $prev = $feat.State
+    if ($prev -eq $DesiredState) { return }
+    if ($DesiredState -eq 'Disabled') {
+        $null = Disable-WindowsOptionalFeature -Online -FeatureName $FeatureName -NoRestart -Remove -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
+    } else {
+        $null = Enable-WindowsOptionalFeature -Online -FeatureName $FeatureName -NoRestart -All -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
+    }
+    Add-ChangeRecord @{
+        Kind         = 'OptionalFeatureState'
+        Id           = $ChangeId
+        FeatureName  = $FeatureName
+        Previous     = $prev
+        New          = $DesiredState
+    }
+}
+
 function Set-ServiceStartWithBackup {
-    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$ServiceName,
         [string]$NewStartMode,
         [string]$ChangeId
     )
-
-    if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
-        Write-Log -Level Warning -Message "Service '$ServiceName' not found on this system. Skipping."
-        return
-    }
-
     $svc = Get-Service -Name $ServiceName -ErrorAction Stop
     $prev = $svc.StartType.ToString()
-
-    if ($DryRun) {
-        Write-Log -Level Debug -Message "DRY-RUN: Would set service '$ServiceName' startup type to '$NewStartMode'." -Data @{ ChangeId = $ChangeId; Previous = $prev; New = $NewStartMode }
-        Add-ChangeRecord @{
-            Kind        = 'ServiceStartType'
-            Id          = $ChangeId
-            ServiceName = $ServiceName
-            Previous    = $prev
-            New         = $NewStartMode
-        }
-        return
-    }
-
     if ($svc.Status -eq 'Running' -and $NewStartMode -in @('Disabled', 'Manual')) {
-        if ($PSCmdlet.ShouldProcess($ServiceName, 'Stop running service before changing startup type')) {
-            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        }
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     }
-    if ($PSCmdlet.ShouldProcess($ServiceName, "Set startup type to $NewStartMode")) {
-        Set-Service -Name $ServiceName -StartupType $NewStartMode -ErrorAction Stop
-    }
+    Set-Service -Name $ServiceName -StartupType $NewStartMode -ErrorAction Stop
     Add-ChangeRecord @{
-        Kind        = 'ServiceStartType'
-        Id          = $ChangeId
-        ServiceName = $ServiceName
-        Previous    = $prev
-        New         = $NewStartMode
+        Kind         = 'ServiceStartType'
+        Id           = $ChangeId
+        ServiceName  = $ServiceName
+        Previous     = $prev
+        New          = $NewStartMode
     }
 }
 
@@ -421,27 +275,18 @@ function Invoke-TweakStep {
     )
     try {
         & $Action
-        if ($DryRun) {
-            Add-SummaryDetail -Label $Label -Result Skipped
-        } else {
-            Add-SummaryDetail -Label $Label -Result Succeeded
-        }
         return $true
     } catch {
         $msg = $_.Exception.Message
         if ([string]::IsNullOrWhiteSpace($msg)) {
             $msg = $_.ToString()
         }
-        Add-SummaryDetail -Label $Label -Result Failed -Error $msg
-        Write-Log -Level Warning -Message "$Label failed: $msg"
+        Write-Warning "$Label failed: $msg"
         return $false
     }
 }
 
 function Invoke-ClassicContextMenuEnable {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     # Windows 11: restore legacy right-click menu
     $clsid = 'HKCU:\Software\Classes\clsid\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'
     $base = Join-Path $clsid 'InprocServer32'
@@ -451,29 +296,10 @@ function Invoke-ClassicContextMenuEnable {
     if ($inprocExisted) {
         $prevDefault = (Get-ItemProperty -LiteralPath $base -Name '(default)' -ErrorAction SilentlyContinue).'(default)'
     }
-
-    if ($DryRun) {
-        Write-Log -Level Debug -Message "DRY-RUN: Would enable classic context menu using '$base'."
-        Add-ChangeRecord @{
-            Kind            = 'ClassicContextMenu'
-            Id              = 'ui-classic-context-menu'
-            ClsidPath       = $clsid
-            InprocPath      = $base
-            ParentExisted   = $parentExisted
-            InprocExisted   = $inprocExisted
-            PreviousDefault = $prevDefault
-        }
-        return
-    }
-
     if (-not $inprocExisted) {
-        if ($PSCmdlet.ShouldProcess($base, 'Create classic context menu registry path')) {
-            New-Item -Path $base -Force | Out-Null
-        }
+        New-Item -Path $base -Force | Out-Null
     }
-    if ($PSCmdlet.ShouldProcess($base, 'Set classic context menu default value')) {
-        Set-ItemProperty -LiteralPath $base -Name '(default)' -Value '' -Force
-    }
+    Set-ItemProperty -LiteralPath $base -Name '(default)' -Value '' -Force
     Add-ChangeRecord @{
         Kind            = 'ClassicContextMenu'
         Id              = 'ui-classic-context-menu'
@@ -524,77 +350,45 @@ function Get-BloatPackageNames {
 }
 
 function Remove-BloatwareForCurrentUser {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     $names = Get-BloatPackageNames
     $removed = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $names.Count; $i++) {
-        $n = $names[$i]
-        $percent = [int](($i / [Math]::Max($names.Count, 1)) * 100)
-        Write-Progress -Activity 'Removing optional apps (current user)' -Status $n -PercentComplete $percent
+    foreach ($n in $names) {
         $pkgs = Get-AppxPackage -Name $n -ErrorAction SilentlyContinue
         foreach ($p in $pkgs) {
             try {
-                if ($DryRun) {
-                    Write-Log -Level Debug -Message "DRY-RUN: Would remove app package '$($p.PackageFullName)'."
-                    $removed.Add($p.PackageFullName)
-                    continue
-                }
-                if ($PSCmdlet.ShouldProcess($p.PackageFullName, 'Remove AppX package for current user')) {
-                    Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
-                    $removed.Add($p.PackageFullName)
-                }
+                Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
+                $removed.Add($p.PackageFullName)
             } catch {
-                Write-Log -Level Warning -Message "Could not remove $($p.PackageFullName): $_"
+                Write-Warning "Could not remove $($p.PackageFullName): $_"
             }
         }
     }
-    Write-Progress -Activity 'Removing optional apps (current user)' -Completed
-
     if ($removed.Count -gt 0) {
         Add-ChangeRecord @{
-            Kind             = 'RemovedAppxPackages'
-            Id               = 'apps-removed-user'
+            Kind            = 'RemovedAppxPackages'
+            Id              = 'apps-removed-user'
             PackageFullNames = @($removed)
         }
     }
-
-    Add-SummaryDetail -Label 'Remove optional pre-installed apps (current user)' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
-    Write-Log -Level Success -Message "Removed $($removed.Count) app package(s) for current user."
-    Write-Log -Level Warning -Message 'Tip: To bring an app back, reinstall it from the Microsoft Store (or use winget).'
+    Write-Host "Removed $($removed.Count) app package(s) for current user." -ForegroundColor Green
+    Write-Host "Tip: To bring an app back, reinstall it from the Microsoft Store (or use winget)." -ForegroundColor DarkYellow
 }
 
 function Remove-BloatwareProvisioned {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     $names = Get-BloatPackageNames
     $removed = [System.Collections.Generic.List[string]]::new()
     $allProvisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
-    for ($i = 0; $i -lt $names.Count; $i++) {
-        $n = $names[$i]
-        $percent = [int](($i / [Math]::Max($names.Count, 1)) * 100)
-        Write-Progress -Activity 'Removing provisioned packages' -Status $n -PercentComplete $percent
+    foreach ($n in $names) {
         $prov = $allProvisioned | Where-Object { $_.DisplayName -eq $n }
         foreach ($p in $prov) {
             try {
-                if ($DryRun) {
-                    Write-Log -Level Debug -Message "DRY-RUN: Would de-provision package '$($p.PackageName)'."
-                    $removed.Add($p.PackageName)
-                    continue
-                }
-                if ($PSCmdlet.ShouldProcess($p.PackageName, 'Remove provisioned AppX package')) {
-                    $null = Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop
-                    $removed.Add($p.PackageName)
-                }
+                $null = Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop
+                $removed.Add($p.PackageName)
             } catch {
-                Write-Log -Level Warning -Message "Could not de-provision $($p.PackageName): $_"
+                Write-Warning "Could not de-provision $($p.PackageName): $_"
             }
         }
     }
-    Write-Progress -Activity 'Removing provisioned packages' -Completed
-
     if ($removed.Count -gt 0) {
         Add-ChangeRecord @{
             Kind         = 'RemovedProvisionedPackages'
@@ -602,9 +396,7 @@ function Remove-BloatwareProvisioned {
             PackageNames = @($removed)
         }
     }
-
-    Add-SummaryDetail -Label 'Remove optional apps for NEW profiles (provisioned)' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
-    Write-Log -Level Success -Message "Removed $($removed.Count) provisioned package(s) (future user profiles)."
+    Write-Host "Removed $($removed.Count) provisioned package(s) (future user profiles)." -ForegroundColor Green
 }
 
 function Set-PrivacyTweaks {
@@ -659,9 +451,9 @@ function Set-PrivacyTweaks {
         }) { $ok++ } else { $failed++ }
 
     if ($failed -eq 0) {
-        Write-Log -Level Success -Message 'Privacy-related tweaks applied (with backups).'
+        Write-Host "Privacy-related tweaks applied (with backups)." -ForegroundColor Green
     } else {
-        Write-Log -Level Warning -Message "Privacy tweaks completed with warnings. Success: $ok, Failed: $failed."
+        Write-Host "Privacy tweaks completed with warnings. Success: $ok, Failed: $failed." -ForegroundColor Yellow
     }
 }
 
@@ -685,36 +477,22 @@ function Set-UiTweaks {
         Set-RegistryDwordWithBackup -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Name 'TurnOffWindowsCopilot' -Value 1 -ChangeId 'ui-copilot-off-machine'
     }
 
-    Write-Log -Level Success -Message 'User interface tweaks applied. Sign out or restart Explorer for full effect.'
-    Write-Log -Level Debug -Message '  (Task Manager -> Windows Explorer -> Restart)'
-    Add-SummaryDetail -Label 'UI: classic right-click (Win11), hide Start recommendations, disable Copilot' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
+    Write-Host "User interface tweaks applied. Sign out or restart Explorer for full effect." -ForegroundColor Green
+    Write-Host "  (Task Manager -> Windows Explorer -> Restart)" -ForegroundColor DarkGray
 }
 
 function Set-TaskbarLeft {
     $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
     Set-RegistryDwordWithBackup -Path $path -Name 'TaskbarAl' -Value 0 -ChangeId 'ui-taskbar-left'
-    Write-Log -Level Success -Message 'Taskbar alignment set to LEFT (Win11). Restart Explorer to refresh.'
-    Add-SummaryDetail -Label 'Taskbar: align icons to the LEFT (Win11)' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
+    Write-Host "Taskbar alignment set to LEFT (Win11). Restart Explorer to refresh." -ForegroundColor Green
 }
 
 function Set-DarkMode {
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
     $path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
-    if (-not (Test-Path -LiteralPath $path)) {
-        if ($DryRun) {
-            Write-Log -Level Debug -Message "DRY-RUN: Would create registry path '$path'."
-        } else {
-            if ($PSCmdlet.ShouldProcess($path, 'Create registry path for dark mode')) {
-                New-Item -Path $path -Force | Out-Null
-            }
-        }
-    }
+    if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
     Set-RegistryDwordWithBackup -Path $path -Name 'AppsUseLightTheme' -Value 0 -ChangeId 'theme-apps-dark'
     Set-RegistryDwordWithBackup -Path $path -Name 'SystemUsesLightTheme' -Value 0 -ChangeId 'theme-system-dark'
-    Write-Log -Level Success -Message 'Dark mode enabled for apps and Windows (current user).'
-    Add-SummaryDetail -Label 'Appearance: enable dark mode (current user)' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
+    Write-Host "Dark mode enabled for apps and Windows (current user)." -ForegroundColor Green
 }
 
 function Set-MiscTweaks {
@@ -723,16 +501,13 @@ function Set-MiscTweaks {
     # Disable lock screen tips / suggestions
     Set-RegistryDwordWithBackup -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338387Enabled' -Value 0 -ChangeId 'misc-lock-tips'
     Set-RegistryDwordWithBackup -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenEnabled' -Value 0 -ChangeId 'misc-lock-rotate-off'
-    Write-Log -Level Success -Message 'Misc tweaks applied.'
-    Add-SummaryDetail -Label 'Extras: show file extensions, reduce lock screen tips' -Result ($(if ($DryRun) { 'Skipped' } else { 'Succeeded' }))
+    Write-Host "Misc tweaks applied." -ForegroundColor Green
 }
 
 function Restore-FromBackupFile {
-    [CmdletBinding(SupportsShouldProcess)]
     param([string]$FilePath)
-
     if (-not (Test-Path -LiteralPath $FilePath)) {
-        Write-Log -Level Warning -Message "Backup not found: $FilePath"
+        Write-Warning "Backup not found: $FilePath"
         return
     }
     $json = Get-Content -LiteralPath $FilePath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -750,40 +525,21 @@ function Restore-FromBackupFile {
                 $path = Get-ChangeProperty -Change $c -PascalName 'Path'
                 $name = Get-ChangeProperty -Change $c -PascalName 'Name'
                 $prev = Get-ChangeProperty -Change $c -PascalName 'Previous'
-                if ($DryRun) {
-                    Write-Log -Level Debug -Message "DRY-RUN: Would restore registry DWORD '$path\$name'."
-                    continue
-                }
                 if ($null -eq $prev) {
-                    if ($PSCmdlet.ShouldProcess("$path\$name", 'Remove registry value during restore')) {
-                        Remove-ItemProperty -LiteralPath $path -Name $name -Force -ErrorAction SilentlyContinue
-                    }
+                    Remove-ItemProperty -LiteralPath $path -Name $name -Force -ErrorAction SilentlyContinue
                 } else {
-                    if (-not (Test-Path -LiteralPath $path)) {
-                        if ($PSCmdlet.ShouldProcess($path, 'Create registry path during restore')) {
-                            New-Item -Path $path -Force | Out-Null
-                        }
-                    }
-                    if ($PSCmdlet.ShouldProcess("$path\$name", 'Restore registry DWORD value')) {
-                        Set-ItemProperty -LiteralPath $path -Name $name -Value $prev -Type DWord -Force
-                    }
+                    if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $path -Name $name -Value $prev -Type DWord -Force
                 }
             }
             'ServiceStartType' {
                 $svcName = Get-ChangeProperty -Change $c -PascalName 'ServiceName'
                 $prev = Get-ChangeProperty -Change $c -PascalName 'Previous'
-                if ($null -eq $prev) {
-                    Write-Log -Level Warning -Message "No previous start type recorded for service $svcName - skipping restore."
-                    continue
-                }
+                if ($null -eq $prev) { Write-Warning "No previous start type recorded for service $svcName - skipping restore."; continue }
                 try {
-                    if ($DryRun) {
-                        Write-Log -Level Debug -Message "DRY-RUN: Would restore service '$svcName' startup type to '$prev'."
-                    } elseif ($PSCmdlet.ShouldProcess($svcName, "Restore service startup type to $prev")) {
-                        Set-Service -Name $svcName -StartupType $prev -ErrorAction Stop
-                    }
+                    Set-Service -Name $svcName -StartupType $prev -ErrorAction Stop
                 } catch {
-                    Write-Log -Level Warning -Message "Could not restore service $svcName : $_"
+                    Write-Warning "Could not restore service $svcName : $_"
                 }
             }
             'ClassicContextMenu' {
@@ -792,62 +548,320 @@ function Restore-FromBackupFile {
                 $parentExisted = Get-ChangeProperty -Change $c -PascalName 'ParentExisted'
                 $inprocExisted = Get-ChangeProperty -Change $c -PascalName 'InprocExisted'
                 $prevData = Get-ChangeProperty -Change $c -PascalName 'PreviousDefault'
-                if ($DryRun) {
-                    Write-Log -Level Debug -Message "DRY-RUN: Would restore classic context menu registry state."
-                    continue
-                }
                 if (-not $parentExisted) {
-                    if ($clsid -and (Test-Path -LiteralPath $clsid) -and $PSCmdlet.ShouldProcess($clsid, 'Remove classic context menu registry tree')) {
+                    if ($clsid -and (Test-Path -LiteralPath $clsid)) {
                         Remove-Item -LiteralPath $clsid -Recurse -Force
                     }
                 } elseif (-not $inprocExisted) {
-                    if ($inproc -and (Test-Path -LiteralPath $inproc) -and $PSCmdlet.ShouldProcess($inproc, 'Remove classic context menu InprocServer32 key')) {
+                    if ($inproc -and (Test-Path -LiteralPath $inproc)) {
                         Remove-Item -LiteralPath $inproc -Recurse -Force -ErrorAction SilentlyContinue
                     }
                 } elseif ($inproc -and (Test-Path -LiteralPath $inproc)) {
                     $val = ''
                     if ($null -ne $prevData) { $val = $prevData }
-                    if ($PSCmdlet.ShouldProcess($inproc, 'Restore classic context menu default value')) {
-                        Set-ItemProperty -LiteralPath $inproc -Name '(default)' -Value $val -Force
-                    }
+                    Set-ItemProperty -LiteralPath $inproc -Name '(default)' -Value $val -Force
                 }
             }
             'RemovedAppxPackages' {
-                Write-Log -Level Warning -Message 'Skipping automatic reinstall of removed apps (use Microsoft Store / winget).'
+                Write-Host "Skipping automatic reinstall of removed apps (use Microsoft Store / winget)." -ForegroundColor DarkYellow
             }
             'RemovedProvisionedPackages' {
-                Write-Log -Level Warning -Message 'Skipping automatic restore of provisioned packages (use Add-AppxPackage / image tools).'
+                Write-Host "Skipping automatic restore of provisioned packages (use Add-AppxPackage / image tools)." -ForegroundColor DarkYellow
+            }
+            'RegistryProperty' {
+                $path = Get-ChangeProperty -Change $c -PascalName 'Path'
+                $name = Get-ChangeProperty -Change $c -PascalName 'Name'
+                $propType = Get-ChangeProperty -Change $c -PascalName 'PropertyType'
+                $prev = Get-ChangeProperty -Change $c -PascalName 'Previous'
+                if ($null -eq $prev) {
+                    Remove-ItemProperty -LiteralPath $path -Name $name -Force -ErrorAction SilentlyContinue
+                } else {
+                    if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $path -Name $name -Value $prev -Type $propType -Force -ErrorAction SilentlyContinue
+                }
+            }
+            'PowerActiveScheme' {
+                $prevGuid = Get-ChangeProperty -Change $c -PascalName 'Previous'
+                if ([string]::IsNullOrWhiteSpace($prevGuid)) { continue }
+                $null = & powercfg.exe /setactive $prevGuid 2>&1
+            }
+            'HibernateEnabledState' {
+                $prevEnabled = Get-ChangeProperty -Change $c -PascalName 'PreviousEnabled'
+                $powerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+                if ($null -ne $prevEnabled -and [int]$prevEnabled -eq 1) {
+                    $null = & powercfg.exe /hibernate on 2>&1
+                    if (-not (Test-Path -LiteralPath $powerKey)) { New-Item -Path $powerKey -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $powerKey -Name 'HibernateEnabled' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                } else {
+                    $null = & powercfg.exe /hibernate off 2>&1
+                    if (-not (Test-Path -LiteralPath $powerKey)) { New-Item -Path $powerKey -Force | Out-Null }
+                    Set-ItemProperty -LiteralPath $powerKey -Name 'HibernateEnabled' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+            }
+            'OptionalFeatureState' {
+                $featName = Get-ChangeProperty -Change $c -PascalName 'FeatureName'
+                $prevState = Get-ChangeProperty -Change $c -PascalName 'Previous'
+                if ([string]::IsNullOrWhiteSpace($featName) -or [string]::IsNullOrWhiteSpace($prevState)) { continue }
+                try {
+                    if ($prevState -eq 'Enabled') {
+                        $null = Enable-WindowsOptionalFeature -Online -FeatureName $featName -NoRestart -All -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
+                    } elseif ($prevState -eq 'Disabled') {
+                        $null = Disable-WindowsOptionalFeature -Online -FeatureName $featName -NoRestart -Remove -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
+                    }
+                } catch {
+                    Write-Warning "Could not restore optional feature $featName to $prevState : $_"
+                }
             }
             default {
-                Write-Log -Level Warning -Message "Unknown backup entry kind: $kind"
+                Write-Warning "Unknown backup entry kind: $kind"
             }
         }
     }
-    Write-Log -Level Success -Message "Restore finished for: $FilePath"
-    Write-Log -Level Warning -Message 'Sign out or reboot if Explorer, Start, or shell still look wrong.'
+    Write-Host "Restore finished for: $FilePath" -ForegroundColor Green
+    Write-Host "Sign out or reboot if Explorer, Start, or shell still look wrong." -ForegroundColor DarkYellow
 }
 
-function Show-MainMenu {
+$deepTweaksPath = Join-Path $Script:RootDir 'DeepTweaks.ps1'
+if (Test-Path -LiteralPath $deepTweaksPath) {
+    . $deepTweaksPath
+} else {
+    Write-Warning "DeepTweaks.ps1 not found at $deepTweaksPath - Advanced / Deep tweaks submenu will not work until the file is present."
+}
+
+function Get-MainMenuEntries {
+    @(
+        @{ Id = '1'; Text = 'Remove optional pre-installed apps (current user)' }
+        @{ Id = '2'; Text = 'Remove optional apps for NEW profiles (provisioned)  [extra thorough]' }
+        @{ Id = '3'; Text = 'Privacy: telemetry, ads ID, activity feed, location service' }
+        @{ Id = '4'; Text = 'UI: classic right-click (Win11), hide Start recommendations, disable Copilot' }
+        @{ Id = '5'; Text = 'Taskbar: align icons to the LEFT (Win11)' }
+        @{ Id = '6'; Text = 'Appearance: enable dark mode (current user)' }
+        @{ Id = '7'; Text = 'Extras: show file extensions, reduce lock screen tips' }
+        @{ Id = '8'; Text = 'Run ALL safe tweaks above (1,3,4,5,6,7) - skips provisioned removal' }
+        @{ Id = 'A'; Text = 'Advanced / Deep tweaks (aggressive; same backup/restore)'; DeepAccent = $true }
+        @{ Id = $null; Text = '--- Restore ---'; Skip = $true }
+        @{ Id = 'R'; Text = 'Restore from a backup file (revert registry & services from that session)' }
+        @{ Id = 'L'; Text = 'List backup files' }
+        @{ Id = 'Q'; Text = 'Quit' }
+    )
+}
+
+function Get-DeepSubMenuEntries {
+    @(
+        @{ Id = '1'; Text = 'Deep performance (visual effects, services, power, hibernation...)' }
+        @{ Id = '2'; Text = 'Deep gaming (Game DVR, mouse accel, GPU scheduling...)' }
+        @{ Id = '3'; Text = 'Deep network (LLMNR, Delivery Optimization, TCP tweaks...)' }
+        @{ Id = '4'; Text = 'Deep privacy extra (Cortana/search web, error reporting...)' }
+        @{ Id = '5'; Text = 'Security hardening (SMBv1, Remote Assistance, RDP...)' }
+        @{ Id = '6'; Text = 'Run ALL deep tweaks' }
+        @{ Id = 'B'; Text = 'Back to main menu' }
+    )
+}
+
+function Read-ArrowMenuSelection {
+    <#
+    .SYNOPSIS
+        Navigate a list with UP/DOWN and confirm with ENTER. Optionally ESC.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$TitleLines = @(),
+        [Parameter(Mandatory)]
+        [hashtable[]]$Entries,
+        [ValidateSet('Ignore', 'Quit', 'Back', 'Cancel')]
+        [string]$OnEscape = 'Ignore',
+        [ConsoleColor]$AccentColor = [ConsoleColor]::Cyan,
+        [ConsoleColor]$SeparatorColor = [ConsoleColor]::Yellow,
+        [string]$FooterHint = 'UP/DOWN: Move   ENTER: Select   ESC:'
+    )
+
+    $selectable = for ($si = 0; $si -lt $Entries.Count; $si++) {
+        $row = $Entries[$si]
+        $isSkip = $row.ContainsKey('Skip') -and $row['Skip']
+        if (-not $isSkip) { $si }
+    }
+    [int[]]$selectableIndexes = @($selectable)
+    if ($selectableIndexes.Count -eq 0) {
+        return @{ Ok = $false; Id = $null }
+    }
+
+    $pos = 0
+    $selectedIndex = $selectableIndexes[0]
+    $legacyMode = $false
+    $cursorWas = $true
+    try { $cursorWas = [Console]::CursorVisible } catch { }
+
+    while (-not $legacyMode) {
+        Clear-Host
+        foreach ($tl in $TitleLines) {
+            Write-Host $tl
+        }
+        for ($i = 0; $i -lt $Entries.Count; $i++) {
+            $e = $Entries[$i]
+            $isSkip = $e.ContainsKey('Skip') -and $e['Skip']
+            $line = if ($isSkip) {
+                "    $($e.Text)"
+            } else {
+                $mark = if ($i -eq $selectedIndex) { '  > ' } else { '    ' }
+                "$mark$($e.Text)"
+            }
+            if ($isSkip) {
+                Write-Host $line -ForegroundColor $SeparatorColor
+                continue
+            }
+            $deepAccent = $e.ContainsKey('DeepAccent') -and $e['DeepAccent']
+            if ($i -eq $selectedIndex) {
+                $fc = if ($deepAccent) { [ConsoleColor]::Magenta } else { $AccentColor }
+                Write-Host $line -ForegroundColor $fc
+            } elseif ($deepAccent) {
+                Write-Host $line -ForegroundColor DarkMagenta
+            } else {
+                Write-Host $line
+            }
+        }
+        $escHint = switch ($OnEscape) {
+            'Quit' { ' quit' }
+            'Back' { ' back' }
+            'Cancel' { ' cancel' }
+            default { ' (n/a)' }
+        }
+        if ($OnEscape -eq 'Ignore') { $escHint = '' }
+        Write-Host ''
+        Write-Host "$FooterHint$escHint" -ForegroundColor DarkGray
+
+        try {
+            if ($cursorWas) { [Console]::CursorVisible = $false }
+            $keyInfo = [Console]::ReadKey($true)
+        } catch {
+            $legacyMode = $true
+            break
+        } finally {
+            if ($cursorWas) { [Console]::CursorVisible = $true }
+        }
+
+        switch ($keyInfo.Key) {
+            'UpArrow' {
+                if ($pos -gt 0) {
+                    $pos--
+                    $selectedIndex = $selectableIndexes[$pos]
+                }
+            }
+            'DownArrow' {
+                if ($pos -lt $selectableIndexes.Count - 1) {
+                    $pos++
+                    $selectedIndex = $selectableIndexes[$pos]
+                }
+            }
+            'Enter' {
+                $chosen = $Entries[$selectedIndex]
+                return @{ Ok = $true; Id = $chosen['Id'] }
+            }
+            'Escape' {
+                switch ($OnEscape) {
+                    'Quit' { return @{ Ok = $false; Id = $null } }
+                    'Back' { return @{ Ok = $false; Id = $null } }
+                    'Cancel' { return @{ Ok = $false; Id = $null } }
+                    default { }
+                }
+            }
+            default { }
+        }
+    }
+
+    # Hosted / redirected console: numbered fallback
     Clear-Host
-    Write-Log -Level Info -Message '========================================'
-    Write-Log -Level Info -Message '  Windows 10/11 Cleanup (interactive)'
-    Write-Log -Level Info -Message '========================================'
-    Write-Log -Level Info -Message ''
-    Write-Log -Level Info -Message ' 1) Remove optional pre-installed apps (current user)'
-    Write-Log -Level Info -Message ' 2) Remove optional apps for NEW profiles (provisioned)  [extra thorough]'
-    Write-Log -Level Info -Message ' 3) Privacy: telemetry, ads ID, activity feed, location service'
-    Write-Log -Level Info -Message ' 4) UI: classic right-click (Win11), hide Start recommendations, disable Copilot'
-    Write-Log -Level Info -Message ' 5) Taskbar: align icons to the LEFT (Win11)'
-    Write-Log -Level Info -Message ' 6) Appearance: enable dark mode (current user)'
-    Write-Log -Level Info -Message ' 7) Extras: show file extensions, reduce lock screen tips'
-    Write-Log -Level Info -Message ' 8) Run ALL safe tweaks above (1,3,4,5,6,7) - skips provisioned removal'
-    Write-Log -Level Info -Message ''
-    Write-Log -Level Warning -Message '--- Restore ---'
-    Write-Log -Level Info -Message ' R) Restore from a backup file (revert registry & services from that session)'
-    Write-Log -Level Info -Message ' L) List backup files'
-    Write-Log -Level Info -Message ''
-    Write-Log -Level Info -Message ' Q) Quit'
-    Write-Log -Level Info -Message ''
+    foreach ($tl in $TitleLines) { Write-Host $tl }
+    Write-Host 'Arrow keys unavailable; type a number to choose:' -ForegroundColor Yellow
+    for ($li = 0; $li -lt $selectableIndexes.Count; $li++) {
+        $ix = $selectableIndexes[$li]
+        Write-Host ("  [{0}] {1}" -f ($li + 1), $Entries[$ix].Text)
+    }
+    if ($OnEscape -ne 'Ignore') {
+        Write-Host ('  [0] {0}' -f ($(switch ($OnEscape) { 'Quit' { 'Quit' } 'Back' { 'Back / cancel' } 'Cancel' { 'Cancel' } default { 'Cancel' } })))
+    }
+    while ($true) {
+        $inp = (Read-Host 'Number').Trim()
+        if ($OnEscape -ne 'Ignore' -and ($inp -eq '0' -or [string]::IsNullOrWhiteSpace($inp))) {
+            return @{ Ok = $false; Id = $null }
+        }
+        $num = 0
+        if (-not [int]::TryParse($inp, [ref]$num)) {
+            Write-Host 'Invalid number. Try again.' -ForegroundColor Yellow
+            continue
+        }
+        if ($num -lt 1 -or $num -gt $selectableIndexes.Count) {
+            Write-Host 'Invalid number. Try again.' -ForegroundColor Yellow
+            continue
+        }
+        $chosenIx = $selectableIndexes[$num - 1]
+        return @{ Ok = $true; Id = $Entries[$chosenIx]['Id'] }
+    }
+}
+
+function Invoke-MainMenuInteractive {
+    $title = @(
+        '========================================',
+        '  Windows 10/11 Cleanup (interactive)',
+        '========================================',
+        ''
+    )
+    return (Read-ArrowMenuSelection -TitleLines $title -Entries @(Get-MainMenuEntries) -OnEscape Quit -AccentColor Cyan -FooterHint 'UP/DOWN: Move   ENTER: Select   ESC:')
+}
+
+function Invoke-AdvancedDeepTweaksSubmenu {
+    if (-not (Get-Command Set-DeepPerformanceTweaks -ErrorAction SilentlyContinue)) {
+        Write-Host "Deep tweaks are not available. Add DeepTweaks.ps1 next to this script and restart." -ForegroundColor Yellow
+        Pause
+        return
+    }
+    $title = @(
+        '========================================',
+        '  Advanced / Deep tweaks',
+        '========================================',
+        ''
+    )
+    while ($true) {
+        $r = Read-ArrowMenuSelection -TitleLines $title -Entries @(Get-DeepSubMenuEntries) -OnEscape Back -AccentColor Magenta -FooterHint 'UP/DOWN: Move   ENTER: Select   ESC:'
+        if (-not $r.Ok) { return }
+        $deepChoice = [string]$r.Id
+        switch ($deepChoice) {
+            '1' {
+                Initialize-SessionBackup
+                Set-DeepPerformanceTweaks
+                Pause
+            }
+            '2' {
+                Initialize-SessionBackup
+                Set-DeepGamingTweaks
+                Pause
+            }
+            '3' {
+                Initialize-SessionBackup
+                Set-DeepNetworkTweaks
+                Pause
+            }
+            '4' {
+                Initialize-SessionBackup
+                Set-DeepPrivacyExtraTweaks
+                Pause
+            }
+            '5' {
+                Initialize-SessionBackup
+                Set-DeepSecurityHardening
+                Pause
+            }
+            '6' {
+                Initialize-SessionBackup
+                Invoke-AllDeepTweaks
+                Pause
+            }
+            'B' { return }
+            default {
+                Write-Host "Unknown option." -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
 }
 
 function Get-Backups {
@@ -857,53 +871,15 @@ function Get-Backups {
         ForEach-Object { "{0}  ({1})" -f $_.Name, $_.LastWriteTime }
 }
 
-function Invoke-RunAllSafeTweaks {
-    Initialize-SessionBackup
-    Remove-BloatwareForCurrentUser
-    Set-PrivacyTweaks
-    Set-UiTweaks
-    Set-TaskbarLeft
-    Set-DarkMode
-    Set-MiscTweaks
-    Write-Log -Level Success -Message "All selected steps finished. Review $Script:SessionBackup if you need to revert."
-    Show-Summary
-}
-
-if ($SkipElevationCheck) {
-    Write-Log -Level Warning -Message 'Skipping elevation check because -SkipElevationCheck was specified.'
-} else {
-    Ensure-ElevatedSession
-}
-
+# --- Main loop ---
 Initialize-BackupDir
-Initialize-LogFile
-Initialize-BackupDir
-Remove-OldBackups
-$null = Test-OSCompatibility
-
-Write-Log -Level Debug -Message "Administrator rights detected. Backups folder: $Script:BackupDir"
-if ($Script:LogFile) {
-    Write-Log -Level Debug -Message "Log file: $Script:LogFile"
-}
-if ($DryRun) {
-    Write-Log -Level Warning -Message '[DRY-RUN MODE] No changes will be written to this system.'
-}
+Write-Host "Administrator rights detected. Backups folder: $Script:BackupDir" -ForegroundColor DarkGray
 Start-Sleep -Milliseconds 400
 
-if ($RunAll) {
-    Invoke-RunAllSafeTweaks
-    if ($Script:Summary.Failed -gt 0) {
-        Write-Log -Level Warning -Message "WARNING: $($Script:Summary.Failed) operation(s) failed during this session. Review the log at: $Script:LogFile"
-    }
-    if ($Script:LogFile) {
-        Write-Log -Level Info -Message "Session log saved to: $Script:LogFile"
-    }
-    return
-}
-
 while ($true) {
-    Show-MainMenu
-    $choice = (Read-Host 'Choose an option').Trim().ToUpperInvariant()
+    $menuResult = Invoke-MainMenuInteractive
+    if (-not $menuResult.Ok) { return }
+    $choice = [string]$menuResult.Id
 
     switch ($choice) {
         '1' {
@@ -912,7 +888,7 @@ while ($true) {
             Pause
         }
         '2' {
-            Write-Log -Level Warning -Message 'This removes packages from the system image for future accounts. Continue? (y/N)'
+            Write-Host "This removes packages from the system image for future accounts. Continue? (y/N)" -ForegroundColor Yellow
             $c = (Read-Host).Trim()
             # PowerShell uses case-insensitive default string comparison; 'Y' matches -eq 'y'.
             if ($c -eq 'y') {
@@ -947,63 +923,62 @@ while ($true) {
             Pause
         }
         '8' {
-            Write-Log -Level Warning -Message 'This runs options 1,3,4,5,6,7 in one go. Continue? (y/N)'
+            Write-Host "This runs options 1,3,4,5,6,7 in one go. Continue? (y/N)" -ForegroundColor Yellow
             $c = (Read-Host).Trim()
             # PowerShell uses case-insensitive default string comparison; 'Y' matches -eq 'y'.
             if ($c -eq 'y') {
-                Invoke-RunAllSafeTweaks
+                Initialize-SessionBackup
+                Remove-BloatwareForCurrentUser
+                Set-PrivacyTweaks
+                Set-UiTweaks
+                Set-TaskbarLeft
+                Set-DarkMode
+                Set-MiscTweaks
+                Write-Host "All selected steps finished. Review $Script:SessionBackup if you need to revert." -ForegroundColor Green
             }
             Pause
+        }
+        'A' {
+            Invoke-AdvancedDeepTweaksSubmenu
         }
         'R' {
             $items = @(Get-ChildItem -LiteralPath $Script:BackupDir -Filter 'session-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
             if ($items.Count -eq 0) {
-                Write-Log -Level Warning -Message 'No backup files found.'
+                Write-Host "No backup files found." -ForegroundColor Yellow
                 Pause
                 continue
             }
-            Write-Log -Level Info -Message 'Recent backups:'
-            for ($i = 0; $i -lt $items.Count; $i++) {
-                Write-Log -Level Info -Message ("  [{0}] {1}" -f ($i + 1), $items[$i].Name)
+            $backupEntries = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($it in $items) {
+                $backupEntries.Add(@{
+                    Id   = $it.FullName
+                    Text = ('{0}  ({1})' -f $it.Name, $it.LastWriteTime)
+                })
             }
-            $n = Read-Host 'Enter number to restore (or blank to cancel)'
-            if ([string]::IsNullOrWhiteSpace($n)) { continue }
-            $idx = 0
-            if (-not [int]::TryParse($n, [ref]$idx) -or $idx -lt 1 -or $idx -gt $items.Count) {
-                Write-Log -Level Warning -Message 'Invalid selection.'
-                Pause
-                continue
-            }
-            $file = $items[$idx - 1].FullName
-            Write-Log -Level Warning -Message 'WARNING: This will revert registry and service changes from the selected session.'
-            $confirmRestore = Read-Host 'Type YES to confirm restore, or press Enter to cancel:'
-            if ($confirmRestore -ne 'YES') {
-                Write-Log -Level Warning -Message 'Restore cancelled.'
-                Pause
-                continue
-            }
-            Write-Log -Level Warning -Message "Restoring from $file ..."
+            $pickTitle = @(
+                '========================================',
+                '  Restore from backup',
+                '========================================',
+                ''
+            )
+            $pick = Read-ArrowMenuSelection -TitleLines $pickTitle -Entries @($backupEntries) -OnEscape Cancel -AccentColor Cyan -FooterHint 'UP/DOWN: Move   ENTER: Restore   ESC:'
+            if (-not $pick.Ok) { continue }
+            $file = [string]$pick.Id
+            if ([string]::IsNullOrWhiteSpace($file)) { continue }
+            Write-Host "Restoring from $file ..." -ForegroundColor Yellow
             Restore-FromBackupFile -FilePath $file
             Pause
         }
         'L' {
             $lines = @(Get-Backups)
-            if ($lines.Count -eq 0) { Write-Log -Level Info -Message '(none yet)' }
-            else { $lines | ForEach-Object { Write-Log -Level Info -Message $_ } }
+            if ($lines.Count -eq 0) { Write-Host "(none yet)" }
+            else { $lines | ForEach-Object { Write-Host $_ } }
             Pause
         }
-        'Q' { break }
+        'Q' { return }
         default {
-            Write-Log -Level Warning -Message 'Unknown option.'
+            Write-Host "Unknown option." -ForegroundColor Yellow
             Start-Sleep -Seconds 1
         }
     }
-}
-
-if ($Script:Summary.Failed -gt 0) {
-    Write-Log -Level Warning -Message "WARNING: $($Script:Summary.Failed) operation(s) failed during this session. Review the log at: $Script:LogFile"
-}
-
-if ($Script:LogFile) {
-    Write-Log -Level Info -Message "Session log saved to: $Script:LogFile"
 }
